@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aplikasi Cek Resi & Tracking ID Marketplace</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <style>
+        .scanner-box { font-size: 1.5rem; text-align: center; }
+        .alert-custom { font-size: 1.2rem; font-weight: bold; }
+        .table-container { max-height: 350px; overflow-y: auto; }
+    </style>
+</head>
+<body class="bg-light">
+    <div class="container my-4">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <h2 class="m-0">Sistem Pengecekan Label / Resi / Tracking ID</h2>
+            <button class="btn btn-outline-danger btn-sm" onclick="resetAllData()">🗑️ Reset / Hapus Semua Data</button>
+        </div>
+        
+        <!-- Upload Section -->
+        <div class="card shadow-sm mb-4">
+            <div class="card-body">
+                <h5 class="card-title">1. Unggah File Excel / CSV Pesanan Tambahan</h5>
+                <p class="text-muted small">Acuan kolom pencocokan: <strong>No Resi</strong> atau <strong>Tracking ID</strong>. Data tersimpan otomatis di browser dan tidak akan hilang saat direfresh.</p>
+                <input class="form-control" type="file" id="excelFile" accept=".xlsx, .xls, .csv">
+            </div>
+        </div>
+
+        <!-- Dashboard / Statistik -->
+        <div class="row text-center mb-4">
+            <div class="col-md-4">
+                <div class="card bg-info text-white shadow-sm">
+                    <div class="card-body">
+                        <h3>Total Acuan</h3>
+                        <h1 id="lblTotal">0</h1>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card bg-success text-white shadow-sm">
+                    <div class="card-body">
+                        <h3>Sudah Dicek</h3>
+                        <h1 id="lblScanned">0</h1>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card bg-warning text-dark shadow-sm">
+                    <div class="card-body">
+                        <h3>Belum Dicek</h3>
+                        <h1 id="lblRemaining">0</h1>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Scan Section -->
+        <div class="card shadow-sm mb-4">
+            <div class="card-body">
+                <h5 class="card-title">2. Scan Barcode (No Resi / Tracking ID)</h5>
+                <input type="text" id="resiInput" class="form-control scanner-box" placeholder="Klik di sini lalu scan barcode..." autocomplete="off" disabled>
+            </div>
+        </div>
+
+        <!-- Notifikasi Hasil Scan Terakhir -->
+        <div id="alertBox" class="alert alert-secondary alert-custom text-center mb-4" role="alert">
+            Silakan unggah file Excel/CSV terlebih dahulu untuk mulai.
+        </div>
+
+        <!-- Tabel Riwayat Scan & Tombol Download -->
+        <div class="card shadow-sm">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="card-title m-0">Riwayat Hasil Scan</h5>
+                    <button id="btnDownload" class="btn btn-success" onclick="downloadReport()" disabled>📥 Download Laporan Hasil Scan</button>
+                </div>
+                <div class="table-container">
+                    <table class="table table-bordered table-striped text-center align-middle">
+                        <thead class="table-dark sticky-top">
+                            <tr>
+                                <th>No</th>
+                                <th>Waktu</th>
+                                <th>Kode (Resi / Tracking ID)</th>
+                                <th>Status Keterangan</th>
+                            </tr>
+                        </thead>
+                        <tbody id="logTableBody">
+                            <tr>
+                                <td colspan="4" class="text-muted">Belum ada data yang di-scan.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let orderMap = new Map(); 
+        let scanHistory = []; 
+
+        const excelFile = document.getElementById('excelFile');
+        const resiInput = document.getElementById('resiInput');
+        const alertBox = document.getElementById('alertBox');
+        const lblTotal = document.getElementById('lblTotal');
+        const lblScanned = document.getElementById('lblScanned');
+        const lblRemaining = document.getElementById('lblRemaining');
+        const logTableBody = document.getElementById('logTableBody');
+        const btnDownload = document.getElementById('btnDownload');
+
+        document.onclick = () => { if(!resiInput.disabled) resiInput.focus(); };
+
+        // Load data tersimpan saat halaman pertama kali dibuka (Persistence)
+        window.addEventListener('DOMContentLoaded', () => {
+            loadFromLocalStorage();
+        });
+
+        excelFile.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = new Uint8Array(e.target.result);
+                    const workbook = XLSX.read(data, {type: 'array'});
+                    const firstSheetName = workbook.SheetNames[0];
+                    const worksheet = workbook.Sheets[firstSheetName];
+                    const json = XLSX.utils.sheet_to_json(worksheet, {header: 1});
+
+                    if (json.length === 0) {
+                        alert("File kosong!");
+                        return;
+                    }
+
+                    const headers = json[0].map(h => String(h).trim().toLowerCase());
+                    let targetColIndex = headers.findIndex(h => h.includes('resi') || h.includes('tracking'));
+
+                    if (targetColIndex === -1) {
+                        alert("Kolom acuan dengan kata 'resi' atau 'tracking' tidak ditemukan di baris pertama file Anda!");
+                        return;
+                    }
+
+                    let addedCount = 0;
+                    for (let i = 1; i < json.length; i++) {
+                        const row = json[i];
+                        if (row && row[targetColIndex]) {
+                            const codeVal = String(row[targetColIndex]).trim();
+                            if (codeVal && !orderMap.has(codeVal)) {
+                                orderMap.set(codeVal, { scanned: false });
+                                addedCount++;
+                            }
+                        }
+                    }
+
+                    saveToLocalStorage();
+                    updateDashboardAndTable();
+
+                    if (orderMap.size > 0) {
+                        resiInput.disabled = false;
+                        resiInput.focus();
+                        alertBox.className = "alert alert-success alert-custom text-center";
+                        alertBox.innerText = `Berhasil menambah ${addedCount} data baru. Total keseluruhan: ${orderMap.size}. Silakan lanjut scan!`;
+                    } else {
+                        alert("Tidak ada data valid yang ditemukan pada kolom tersebut.");
+                    }
+
+                    excelFile.value = '';
+
+                } catch (err) {
+                    alert("Gagal membaca file: " + err.message);
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        resiInput.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                const codeVal = resiInput.value.trim();
+                resiInput.value = ''; 
+
+                if (!codeVal) return;
+
+                const now = new Date();
+                const timeString = now.toTimeString().split(' ')[0]; 
+                let statusInfo = "";
+                let typeStatus = "";
+
+                if (!orderMap.has(codeVal)) {
+                    typeStatus = "danger";
+                    statusInfo = "TIDAK ADA (Label Lebih/Asing)";
+                    alertBox.className = "alert alert-danger alert-custom text-center";
+                    alertBox.innerHTML = `❌ GAGAL! Kode <strong>${codeVal}</strong> TIDAK ADA dalam daftar acuan (Lebih/Asing).`;
+                } else {
+                    const order = orderMap.get(codeVal);
+                    if (order.scanned) {
+                        typeStatus = "warning";
+                        statusInfo = "GANDA (Sudah pernah di-scan)";
+                        alertBox.className = "alert alert-warning alert-custom text-center";
+                        alertBox.innerHTML = `⚠️ PERINGATAN! Kode <strong>${codeVal}</strong> SUDAH PERNAH di-scan sebelumnya (Ganda)!`;
+                    } else {
+                        order.scanned = true;
+                        typeStatus = "success";
+                        statusInfo = "VALID (Berhasil Dicocokkan)";
+                        alertBox.className = "alert alert-success alert-custom text-center";
+                        alertBox.innerHTML = `✅ VALID: Kode <strong>${codeVal}</strong> berhasil dicocokkan.`;
+                    }
+                }
+
+                scanHistory.push({
+                    time: timeString,
+                    code: codeVal,
+                    status: statusInfo,
+                    type: typeStatus
+                });
+
+                saveToLocalStorage();
+                updateDashboardAndTable();
+            }
+        });
+
+        function updateDashboardAndTable() {
+            let totalData = orderMap.size;
+            let scannedCount = 0;
+            orderMap.forEach((val) => {
+                if (val.scanned) scannedCount++;
+            });
+            let remaining = totalData - scannedCount;
+
+            lblTotal.innerText = totalData;
+            lblScanned.innerText = scannedCount;
+            lblRemaining.innerText = remaining;
+
+            if (totalData > 0) {
+                resiInput.disabled = false;
+            }
+
+            if (scanHistory.length === 0) {
+                logTableBody.innerHTML = `<tr><td colspan="4" class="text-muted">Belum ada data yang di-scan.</td></tr>`;
+                btnDownload.disabled = true;
+                return;
+            }
+
+            btnDownload.disabled = false; 
+
+            let html = "";
+            scanHistory.forEach((item, index) => {
+                let badgeClass = "bg-success";
+                if (item.type === "danger") badgeClass = "bg-danger";
+                if (item.type === "warning") badgeClass = "bg-warning text-dark";
+
+                html += `
+                    <tr>
+                        <td>${index + 1}</td>
+                        <td>${item.time}</td>
+                        <td class="fw-bold">${item.code}</td>
+                        <td><span class="badge ${badgeClass}">${item.status}</span></td>
+                    </tr>
+                `;
+            });
+            logTableBody.innerHTML = html;
+
+            const container = document.querySelector('.table-container');
+            container.scrollTop = container.scrollHeight;
+        }
+
+        // Fungsi Simpan ke Memori Browser (Local Storage)
+        function saveToLocalStorage() {
+            // Ubah Map ke Array untuk disimpan ke JSON
+            const orderArray = Array.from(orderMap.entries());
+            localStorage.setItem('saved_orders', JSON.stringify(orderArray));
+            localStorage.setItem('saved_history', JSON.stringify(scanHistory));
+        }
+
+        // Fungsi Ambil dari Memori Browser
+        function loadFromLocalStorage() {
+            const savedOrders = localStorage.getItem('saved_orders');
+            const savedHistory = localStorage.getItem('saved_history');
+
+            if (savedOrders) {
+                orderMap = new Map(JSON.parse(savedOrders));
+            }
+            if (savedHistory) {
+                scanHistory = JSON.parse(savedHistory);
+            }
+
+            updateDashboardAndTable();
+        }
+
+        // Fungsi Reset Data
+        function resetAllData() {
+            if (confirm("Apakah Anda yakin ingin menghapus semua data dan riwayat scan?")) {
+                localStorage.removeItem('saved_orders');
+                localStorage.removeItem('saved_history');
+                orderMap.clear();
+                scanHistory = [];
+                updateDashboardAndTable();
+                resiInput.disabled = true;
+                alertBox.className = "alert alert-secondary alert-custom text-center mb-4";
+                alertBox.innerText = "Data telah direset. Silakan unggah file Excel/CSV baru.";
+            }
+        }
+
+        function downloadReport() {
+            if (scanHistory.length === 0) return;
+
+            const dataToExport = scanHistory.map((item, index) => ({
+                "No": index + 1,
+                "Waktu Scan": item.time,
+                "No Resi / Tracking ID": item.code,
+                "Status Keterangan": item.status
+            }));
+
+            const worksheet = XLSX.utils.json_to_sheet(dataToExport);
+            const workbook = XLSX.utils.book_new();
+            XLSX.utils.book_append_sheet(workbook, worksheet, "Laporan Scan Resi");
+
+            const dateStr = new Date().toISOString().slice(0, 10);
+            const fileName = `Laporan_Scan_TrackingID_${dateStr}.xlsx`;
+
+            XLSX.writeFile(workbook, fileName);
+        }
+    </script>
+</body>
+</html>
